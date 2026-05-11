@@ -1,0 +1,4 @@
+- ONNX export entrypoint is tools/test.py with --export-onnx, but runtime export logic executes deploy/export_vision.py (OmniDriveVisionTrtProxy).
+- For random-weight export, checkpoint can be omitted and export still succeeds.
+- Missing symbols encountered and fixed in deploy/export_vision.py imports: memory_refresh, transform_reference_points, nerf_positional_encoding, pos2posemb1d, topk_gather, transform_reference_points_lane.
+- Successful command: PYTHONPATH=. conda run -n omnidrive_onnx python tools/test.py projects/configs/OmniDrive/mask_eva_lane_det_vlm.py --launcher none --export-onnx --onnx-file onnxs/mask_eva_lane_det_vlm_random.onnx

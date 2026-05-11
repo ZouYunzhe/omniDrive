@@ -10,9 +10,9 @@ import torch.nn as nn
 import numpy as np
 from mmdet.core import bbox_xyxy_to_cxcywh
 from mmdet.models.utils.transformer import inverse_sigmoid
-from peft import LoraConfig, get_peft_model
+## Only import peft when needed (for ONNX export compatibility)
 from ..dense_heads.llava_llama import LlavaLlamaForCausalLM
-from peft import LoraConfig, get_peft_model
+
 
 
 def memory_refresh(memory, prev_exist):
@@ -232,13 +232,14 @@ def transform_reference_points_lane(reference_points, egopose, reverse=False, tr
 def load_model(base_model, use_lora, frozen):
     model = LlavaLlamaForCausalLM.from_pretrained(base_model, torch_dtype=torch.float16, device_map='cpu')
     model.gradient_checkpointing_enable()
-    
+
     if frozen:
         model.eval()
         for p in model.parameters():
             p.requires_grad = False
-            
+
     if use_lora:
+        from peft import LoraConfig, get_peft_model
         peft_config = LoraConfig(
                 r=128,
                 lora_alpha=16,
@@ -248,7 +249,7 @@ def load_model(base_model, use_lora, frozen):
                 task_type="CAUSAL_LM")
         model = get_peft_model(model, peft_config)
 
-        for param in filter(lambda p: p.requires_grad,model.parameters()):
+        for param in filter(lambda p: p.requires_grad, model.parameters()):
             param.data = param.data.to(torch.float32)
-               
+
     return model

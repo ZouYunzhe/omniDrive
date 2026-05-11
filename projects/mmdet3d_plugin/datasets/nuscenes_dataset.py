@@ -30,7 +30,13 @@ from .utils.constants import DEFAULT_IMAGE_TOKEN
 import copy
 import pickle
 import os
-from openlanev2.centerline.evaluation import evaluate as openlanev2_evaluate
+
+# Only import openlanev2 when actually needed (for ONNX export compatibility)
+openlanev2_evaluate = None
+try:
+    from openlanev2.centerline.evaluation import evaluate as openlanev2_evaluate
+except ImportError:
+    pass
 @DATASETS.register_module()
 class CustomNuScenesDataset(NuScenesDataset):
     r"""NuScenes Dataset.

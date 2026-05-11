@@ -1,3 +1,9 @@
+from projects.mmdet3d_plugin.models.utils.misc import memory_refresh
+from projects.mmdet3d_plugin.models.utils.misc import topk_gather
+from projects.mmdet3d_plugin.models.utils.positional_encoding import nerf_positional_encoding
+from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb1d
+from projects.mmdet3d_plugin.models.utils.misc import transform_reference_points
+from projects.mmdet3d_plugin.models.utils.misc import transform_reference_points_lane
 import argparse
 import mmcv
 import numpy as np
@@ -5,11 +11,13 @@ import os
 import torch
 import warnings
 from mmcv import Config, DictAction
+
 import onnx
 import onnxsim
 import io
 import onnxruntime as ort
 import onnx_graphsurgeon as gs
+from mmdet.models.utils.transformer import inverse_sigmoid
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OmniDrive ONNX export(Vision part).')
