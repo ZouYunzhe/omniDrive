@@ -74,6 +74,13 @@ The [vision encoder + projector weights](https://github.com/NVlabs/OmniDrive/rel
 
 The [pkl files](https://github.com/NVlabs/OmniDrive/releases/download/v1.0/eval_cf.zip), [evaluation](https://github.com/NVlabs/OmniDrive/releases/download/v1.0/eval_counter.py), [extraction](https://github.com/NVlabs/OmniDrive/releases/download/v1.0/extract_counter.py) scripts for counterfactual reasoning.
 
+## ONNX Export Environment (Validated)
+
+For a validated ONNX export environment (Python 3.9 + CUDA 11.7), see:
+
+- docs/setup_onnx_export.md
+- requirements_onnx_export.txt
+
 
 
 

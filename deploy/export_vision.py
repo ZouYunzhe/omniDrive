@@ -5,20 +5,11 @@ import os
 import torch
 import warnings
 from mmcv import Config, DictAction
-from mmcv.cnn import fuse_conv_bn
-from mmcv.parallel import MMDataParallel
-from mmcv.runner import load_checkpoint, wrap_fp16_model
 import onnx
 import onnxsim
 import io
-from mmdet3d.models import build_model
-from mmdet.apis import set_random_seed
-from mmdet.datasets import replace_ImageToTensor
-from mmdet.models.utils.transformer import inverse_sigmoid
 import onnxruntime as ort
 import onnx_graphsurgeon as gs
-from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb1d, nerf_positional_encoding
-from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points_lane, transform_reference_points, memory_refresh
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OmniDrive ONNX export(Vision part).')
@@ -416,6 +407,27 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
 
 def main():
     args = parse_args()
+
+    global fuse_conv_bn, MMDataParallel, load_checkpoint, wrap_fp16_model
+    global build_model, set_random_seed, replace_ImageToTensor, inverse_sigmoid
+    global pos2posemb1d, nerf_positional_encoding
+    global MLN, topk_gather, transform_reference_points_lane, transform_reference_points, memory_refresh
+
+    from mmcv.cnn import fuse_conv_bn
+    from mmcv.parallel import MMDataParallel
+    from mmcv.runner import load_checkpoint, wrap_fp16_model
+    from mmdet3d.models import build_model
+    from mmdet.apis import set_random_seed
+    from mmdet.datasets import replace_ImageToTensor
+    from mmdet.models.utils.transformer import inverse_sigmoid
+    from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb1d, nerf_positional_encoding
+    from projects.mmdet3d_plugin.models.utils.misc import (
+        MLN,
+        topk_gather,
+        transform_reference_points_lane,
+        transform_reference_points,
+        memory_refresh,
+    )
     onnx_device = 'cpu'
     input_precision = np.float32
     cfg = Config.fromfile(args.config)
