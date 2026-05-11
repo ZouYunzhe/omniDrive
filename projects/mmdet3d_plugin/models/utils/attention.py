@@ -25,8 +25,14 @@ from einops import rearrange
 from mmcv.runner import auto_fp16
 from mmcv.runner.base_module import BaseModule
 
-from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
-from flash_attn.bert_padding import unpad_input, pad_input, index_first_axis
+try:
+    from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
+    from flash_attn.bert_padding import unpad_input, pad_input, index_first_axis
+except ImportError:
+    flash_attn_varlen_kvpacked_func = None
+    unpad_input = None
+    pad_input = None
+    index_first_axis = None
 
 
 def _in_projection_packed(q, k, v, w, b = None):
@@ -65,6 +71,9 @@ class FlashAttention(nn.Module):
             kv: The tensor containing the key, and value. (B, S, 2, H, D) 
             key_padding_mask: a bool tensor of shape (B, S)
         """
+        if flash_attn_varlen_kvpacked_func is None:
+            raise ImportError('flash_attn is required when FlashAttention is actually used.')
+
         assert q.dtype in [torch.float16, torch.bfloat16] and kv.dtype in [torch.float16, torch.bfloat16]
         assert q.is_cuda and kv.is_cuda
         assert q.shape[0] == kv.shape[0] and q.shape[-2] == kv.shape[-2] and q.shape[-1] == kv.shape[-1]
