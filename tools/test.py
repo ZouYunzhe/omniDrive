@@ -106,6 +106,21 @@ def parse_args():
         type=int,
         default=17,
         help='ONNX opset version for export')
+    parser.add_argument(
+        '--export-cams',
+        type=int,
+        default=6,
+        help='number of camera views used for ONNX export dummy input')
+    parser.add_argument(
+        '--export-height',
+        type=int,
+        default=640,
+        help='dummy image height for ONNX export')
+    parser.add_argument(
+        '--export-width',
+        type=int,
+        default=640,
+        help='dummy image width for ONNX export')
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -265,18 +280,19 @@ def main():
         if args.export_onnx:
             from deploy.export_vision import OmniDriveVisionTrtProxy
 
-            model = model.float().cpu()
+            onnx_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f'ONNX export device: {onnx_device}')
+
+            model = model.float().to(onnx_device)
+            input_precision = np.float32
             model.eval()
             model.training = False
 
             mmcv.mkdir_or_exist(osp.dirname(args.onnx_file) or '.')
 
-            input_precision = np.float32
-            onnx_device = 'cpu'
-
-            img = np.ones([1, 6, 3, 640, 640], dtype=np.float32)
-            intrinsics = np.ones([1, 6, 4, 4], dtype=np.float32)
-            img2lidars = np.ones([1, 6, 4, 4], dtype=np.float32)
+            img = np.ones([1, args.export_cams, 3, args.export_height, args.export_width], dtype=np.float32)
+            intrinsics = np.ones([1, args.export_cams, 4, 4], dtype=np.float32)
+            img2lidars = np.ones([1, args.export_cams, 4, 4], dtype=np.float32)
             command = np.ones([1], dtype=np.float32)
             can_bus = np.ones([1, 13], dtype=np.float32)
             is_first_frame = np.ones([1], dtype=np.float32)
@@ -346,6 +362,7 @@ def main():
                 'vision_embeded',
                 'all_cls_scores',
                 'all_bbox_preds',
+                'bbox_pre_cls',
                 'all_lane_cls_one2one',
                 'all_lane_preds_one2one',
                 'all_lane_cls_one2many',
@@ -363,6 +380,18 @@ def main():
                 'memory_egopose_map_out',
                 'memory_reference_point_map_out',
                 'sample_time_map_out',
+                'bbox_memory_ref_pre_update',
+                'bbox_memory_ref_post_cat',
+                'bbox_memory_ref_post_transform',
+                'map_memory_ref_pre_update',
+                'map_memory_ref_post_cat',
+                'map_memory_ref_post_transform',
+                'bbox_rec_score',
+                'bbox_topk_indexes',
+                'bbox_rec_reference_points',
+                'map_rec_score',
+                'map_topk_indexes',
+                'map_rec_reference_points',
             ]
 
             torch.onnx.export(
@@ -371,7 +400,7 @@ def main():
                 args.onnx_file,
                 input_names=input_names,
                 output_names=output_names,
-                do_constant_folding=True,
+                do_constant_folding=False,
                 opset_version=args.opset_version,
                 verbose=False)
             print(f'ONNX model is exported to {args.onnx_file}')

@@ -60,7 +60,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         super().__init__(*args, **kwargs)
         self.mod = mod
     
-    def locations(self, stride, pad_h, pad_w):
+    def locations(self, stride, pad_h, pad_w, device):
         """
         Arguments:
             features:  (N, C, H, W)
@@ -68,8 +68,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             locations:  (H, W, 2)
         """
 
-        h, w = 40, 40
-        device = "cpu"
+        h, w = pad_h // stride, pad_w // stride
         shifts_x = (torch.arange(
             0, stride*w, step=stride,
             dtype=torch.float32, device=device
@@ -78,16 +77,17 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             0, h * stride, step=stride,
             dtype=torch.float32, device=device
         ) + stride // 2) / pad_h
-        shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
+        shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing='ij')
         shift_x = shift_x.reshape(-1)
         shift_y = shift_y.reshape(-1)
         locations = torch.stack((shift_x, shift_y), dim=1)
         locations = locations.reshape(h, w, 2)
         return locations
     
-    def pos_embedding(self, intrinsics, img2lidars):
-        pad_h, pad_w, _ = (640, 640, 3)
-        memory_centers = self.locations(16, pad_h, pad_w)[None].repeat(1*6, 1, 1, 1)
+    def pos_embedding(self, intrinsics, img2lidars, pad_h, pad_w):
+        B, N = intrinsics.size(0), intrinsics.size(1)
+        target_dtype = img2lidars.dtype
+        memory_centers = self.locations(16, pad_h, pad_w, intrinsics.device)[None].repeat(B * N, 1, 1, 1).to(target_dtype)
 
         eps = 1e-5
         BN, H, W, _ = memory_centers.shape
@@ -106,7 +106,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
 
         memory_centers = memory_centers.detach().view(B, LEN, 1, 2)
         topk_centers = memory_centers.repeat(1, 1, D, 1)
-        coords_d = self.mod.coords_d.view(1, 1, D, 1).repeat(B, num_sample_tokens, 1 , 1)
+        coords_d = self.mod.coords_d.to(device=intrinsics.device, dtype=target_dtype).view(1, 1, D, 1).repeat(B, num_sample_tokens, 1 , 1)
         coords = torch.cat([topk_centers, coords_d], dim=-1)
         coords = torch.cat((coords, torch.ones_like(coords[..., :1])), -1)
         coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)
@@ -127,8 +127,8 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         head = self.mod.map_head
 
         B = img_feats.size(0)
-        memory_timestamp += timestamp.unsqueeze(-1).unsqueeze(-1)
-        sample_time += timestamp
+        memory_timestamp = memory_timestamp + timestamp.unsqueeze(-1).unsqueeze(-1)
+        sample_time = sample_time + timestamp
         sample_time_x = (torch.abs(sample_time) < 2.0).to(img_feats.dtype)
         sample_time_x *= (1.-is_first_frame)
         memory_egopose = ego_pose_inv.unsqueeze(1) @ memory_egopose
@@ -180,8 +180,8 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
             temp_pos = head.ego_pose_pe(temp_pos, memory_ego_motion)
 
-        query_pos += head.time_embedding(pos2posemb1d(torch.zeros_like(tgt[...,:1])))
-        temp_pos += head.time_embedding(pos2posemb1d(memory_timestamp).float())
+        query_pos = query_pos + head.time_embedding(pos2posemb1d(torch.zeros_like(tgt[...,:1])))
+        temp_pos = temp_pos + head.time_embedding(pos2posemb1d(memory_timestamp).float())
 
         tgt = torch.cat([query_embedding, tgt], dim=1)
         query_pos = torch.cat([torch.zeros_like(query_embedding), query_pos], dim=1)
@@ -203,7 +203,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             outputs_lanecls = head.cls_branches[lvl](lane_queries[lvl])
 
             tmp = tmp.reshape(B, head.num_lane, head.n_control*3)
-            tmp += reference
+            tmp = tmp + reference
             tmp = tmp.sigmoid()
 
             outputs_coord = tmp
@@ -230,16 +230,23 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
 
         _, topk_indexes = torch.topk(rec_score, head.topk_proposals, dim=1)
+        map_rec_score = rec_score
+        map_topk_indexes = topk_indexes
         rec_timestamp = topk_gather(rec_timestamp, topk_indexes)
         rec_reference_points = topk_gather(rec_reference_points, topk_indexes).detach()
+        map_rec_reference_points = rec_reference_points
         rec_memory = topk_gather(out_memory, topk_indexes).detach()
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
+
+        map_memory_ref_pre_update = memory_reference_point
 
         memory_embedding = torch.cat([rec_memory, memory_embedding], dim=1)
         memory_timestamp = torch.cat([rec_timestamp, memory_timestamp], dim=1)
         memory_egopose= torch.cat([rec_ego_pose, memory_egopose], dim=1)
         memory_reference_point = torch.cat([rec_reference_points, memory_reference_point], dim=1)
+        map_memory_ref_post_cat = memory_reference_point
         memory_reference_point = transform_reference_points_lane(memory_reference_point, ego_pose, reverse=False)
+        map_memory_ref_post_transform = memory_reference_point
         memory_timestamp -= timestamp.unsqueeze(-1).unsqueeze(-1)
         sample_time -= timestamp
         memory_egopose = ego_pose.unsqueeze(1) @ memory_egopose
@@ -247,7 +254,9 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         if head.output_dims is not None:
             vlm_memory = head.output_projection(vlm_memory)
         return all_lane_cls_one2one, all_lane_preds_one2one, all_lane_cls_one2many, all_lane_preds_one2many, outs_dec_one2one, outs_dec_one2many, vlm_memory, \
-            memory_embedding, memory_timestamp, memory_egopose, memory_reference_point, sample_time
+            memory_embedding, memory_timestamp, memory_egopose, memory_reference_point, sample_time, \
+            map_memory_ref_pre_update, map_memory_ref_post_cat, map_memory_ref_post_transform, \
+            map_rec_score, map_topk_indexes, map_rec_reference_points
 
     def bboxStreamPETR_forward(self, img_feats, pos_embed, command, can_bus, is_first_frame,
                                memory_embedding, memory_reference_point, memory_timestamp, memory_egopose, memory_canbus,
@@ -255,8 +264,8 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         head = self.mod.pts_bbox_head
 
         B = img_feats.size(0)
-        memory_timestamp += timestamp.unsqueeze(-1).unsqueeze(-1)
-        sample_time += timestamp
+        memory_timestamp = memory_timestamp + timestamp.unsqueeze(-1).unsqueeze(-1)
+        sample_time = sample_time + timestamp
         sample_time_x = (torch.abs(sample_time) < 2.0).to(img_feats.dtype)
         sample_time_x *= (1.-is_first_frame)
         memory_egopose = ego_pose_inv.unsqueeze(1) @ memory_egopose
@@ -312,8 +321,8 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
             temp_pos = head.ego_pose_pe(temp_pos, memory_ego_motion)
 
-        query_pos += head.time_embedding(pos2posemb1d(torch.zeros_like(reference_points[...,:1])))
-        temp_pos += head.time_embedding(pos2posemb1d(memory_timestamp).float())
+        query_pos = query_pos + head.time_embedding(pos2posemb1d(torch.zeros_like(reference_points[...,:1])))
+        temp_pos = temp_pos + head.time_embedding(pos2posemb1d(memory_timestamp).float())
 
         if head.num_propagated > 0:
             tgt = torch.cat([tgt, temp_memory[:, :head.num_propagated]], dim=1)
@@ -333,6 +342,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         vlm_memory = outs_dec[-1, :, :head.num_extra, :]
         outs_dec = outs_dec[:, :, head.num_extra:, :]
 
+        bbox_pre_cls = outs_dec
         outputs_classes = []
         outputs_coords = []
         for lvl in range(outs_dec.shape[0]):
@@ -340,7 +350,7 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
             outputs_class = head.cls_branches[lvl](outs_dec[lvl])
             tmp = head.reg_branches[lvl](outs_dec[lvl])
 
-            tmp[..., 0:3] += reference[..., 0:3]
+            tmp[..., 0:3] = tmp[..., 0:3] + reference[..., 0:3]
             tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
 
             outputs_coord = tmp
@@ -365,23 +375,32 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
         rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
 
         _, topk_indexes = torch.topk(rec_score, head.topk_proposals, dim=1)
+        bbox_rec_score = rec_score
+        bbox_topk_indexes = topk_indexes
         rec_timestamp = topk_gather(rec_timestamp, topk_indexes)
         rec_reference_points = topk_gather(rec_reference_points, topk_indexes).detach()
+        bbox_rec_reference_points = rec_reference_points
         rec_memory = topk_gather(out_memory, topk_indexes).detach()
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
         rec_velo = topk_gather(rec_velo, topk_indexes).detach()
+
+        bbox_memory_ref_pre_update = memory_reference_point
 
         memory_embedding = torch.cat([rec_memory, memory_embedding], dim=1)
         memory_timestamp = torch.cat([rec_timestamp, memory_timestamp], dim=1)
         memory_egopose= torch.cat([rec_ego_pose, memory_egopose], dim=1)
         memory_reference_point = torch.cat([rec_reference_points, memory_reference_point], dim=1)
+        bbox_memory_ref_post_cat = memory_reference_point
         memory_canbus = torch.cat([rec_can_bus.unsqueeze(-2), memory_canbus], dim=1)
         memory_reference_point = transform_reference_points(memory_reference_point, ego_pose, reverse=False)
+        bbox_memory_ref_post_transform = memory_reference_point
         memory_timestamp -= timestamp.unsqueeze(-1).unsqueeze(-1)
         sample_time -= timestamp
         memory_egopose = ego_pose.unsqueeze(1) @ memory_egopose
-        return all_cls_scores, all_bbox_preds, vlm_memory, \
-            memory_embedding, memory_reference_point, memory_timestamp, memory_egopose, memory_canbus, sample_time
+        return all_cls_scores, all_bbox_preds, bbox_pre_cls, vlm_memory, \
+            memory_embedding, memory_reference_point, memory_timestamp, memory_egopose, memory_canbus, sample_time, \
+            bbox_memory_ref_pre_update, bbox_memory_ref_post_cat, bbox_memory_ref_post_transform, \
+            bbox_rec_score, bbox_topk_indexes, bbox_rec_reference_points
 
     def forward(self, img, intrinsics, img2lidars, command, can_bus, is_first_frame, ego_pose, timestamp, ego_pose_inv,
                 memory_embedding_bbox, memory_reference_point_bbox, memory_timestamp_bbox,
@@ -390,28 +409,37 @@ class OmniDriveVisionTrtProxy(torch.nn.Module):
                 memory_embedding_map, memory_reference_point_map):
         
         img_feats = self.mod.extract_img_feat(img)
-        pos_embed_input = self.pos_embedding(intrinsics=intrinsics, img2lidars=img2lidars)
+        pad_h, pad_w = int(img.size(-2)), int(img.size(-1))
+        pos_embed_input = self.pos_embedding(intrinsics=intrinsics, img2lidars=img2lidars, pad_h=pad_h, pad_w=pad_w)
         pos_embed = self.mod.position_encoder(pos_embed_input)
 
-        all_cls_scores, all_bbox_preds, vlm_memory_bbox, \
-        memory_embedding_bbox, memory_reference_point_bbox, memory_timestamp_bbox, memory_egopose_bbox, memory_canbus_bbox, sample_time_bbox = \
+        all_cls_scores, all_bbox_preds, bbox_pre_cls, vlm_memory_bbox, \
+        memory_embedding_bbox, memory_reference_point_bbox, memory_timestamp_bbox, memory_egopose_bbox, memory_canbus_bbox, sample_time_bbox, \
+        bbox_memory_ref_pre_update, bbox_memory_ref_post_cat, bbox_memory_ref_post_transform, \
+        bbox_rec_score, bbox_topk_indexes, bbox_rec_reference_points = \
                 self.bboxStreamPETR_forward(img_feats, pos_embed, 
                                     command, can_bus, is_first_frame,
                                     memory_embedding_bbox, memory_reference_point_bbox, memory_timestamp_bbox,
                                     memory_egopose_bbox, memory_canbus_bbox,
                                     sample_time_bbox, ego_pose, timestamp, ego_pose_inv)
         all_lane_cls_one2one, all_lane_preds_one2one, all_lane_cls_one2many, all_lane_preds_one2many, outs_dec_one2one, outs_dec_one2many, vlm_memory_map, \
-        memory_embedding_map, memory_timestamp_map, memory_egopose_map, memory_reference_point_map, sample_time_map = \
+        memory_embedding_map, memory_timestamp_map, memory_egopose_map, memory_reference_point_map, sample_time_map, \
+        map_memory_ref_pre_update, map_memory_ref_post_cat, map_memory_ref_post_transform, \
+        map_rec_score, map_topk_indexes, map_rec_reference_points = \
                 self.mapPETR_forward(img_feats, pos_embed, 
                                      timestamp, ego_pose, ego_pose_inv, is_first_frame,
                                      memory_timestamp_map, sample_time_map, memory_egopose_map, 
                                      memory_embedding_map, memory_reference_point_map)
         
         vision_embeded = torch.cat([vlm_memory_bbox, vlm_memory_map], dim=1)
-        return vision_embeded, all_cls_scores, all_bbox_preds, \
+        return vision_embeded, all_cls_scores, all_bbox_preds, bbox_pre_cls, \
             all_lane_cls_one2one, all_lane_preds_one2one, all_lane_cls_one2many, all_lane_preds_one2many, outs_dec_one2one, outs_dec_one2many, \
             memory_embedding_bbox, memory_reference_point_bbox, memory_timestamp_bbox, memory_egopose_bbox, memory_canbus_bbox, sample_time_bbox, \
-            memory_embedding_map, memory_timestamp_map, memory_egopose_map, memory_reference_point_map, sample_time_map
+            memory_embedding_map, memory_timestamp_map, memory_egopose_map, memory_reference_point_map, sample_time_map, \
+            bbox_memory_ref_pre_update, bbox_memory_ref_post_cat, bbox_memory_ref_post_transform, \
+            map_memory_ref_pre_update, map_memory_ref_post_cat, map_memory_ref_post_transform, \
+            bbox_rec_score, bbox_topk_indexes, bbox_rec_reference_points, \
+            map_rec_score, map_topk_indexes, map_rec_reference_points
 
 def main():
     args = parse_args()

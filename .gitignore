@@ -19,3 +19,4 @@ deploy/llm_lib/llm_safetensor*/
 *.tmp
 *.log
 *.pyc
+eva02_petr_proj.pth
